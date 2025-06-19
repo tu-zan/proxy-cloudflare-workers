@@ -12,7 +12,7 @@ export default {
     }
 
     try {
-      const { api_url, payload } = await request.json();
+      const { api_url, headers: customHeaders = {}, payload } = await request.json();
 
       if (!api_url || typeof api_url !== 'string' || !/^https?:\/\//.test(api_url)) {
         return new Response(JSON.stringify({ error: 'Invalid or missing api_url' }), {
@@ -21,20 +21,21 @@ export default {
         });
       }
 
-      // Copy headers từ client request
-      const incomingHeaders = request.headers;
+      // Chuẩn bị headers
       const headers = new Headers();
 
-      for (const [key, value] of incomingHeaders.entries()) {
-        if (['host', 'content-length'].includes(key.toLowerCase())) continue;
-        headers.set(key, value);
-      }
-
-      // Override bắt buộc
+      // Mặc định override
       headers.set('accept', 'application/json, text/plain, */*');
       headers.set('accept-language', 'vi,en-US;q=0.9,en;q=0.8,uz;q=0.7');
       headers.set('user-agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36');
       headers.set('content-type', 'application/json');
+
+      // Gắn thêm custom headers từ payload.headers
+      for (const key in customHeaders) {
+        if (customHeaders.hasOwnProperty(key)) {
+          headers.set(key, customHeaders[key]);
+        }
+      }
 
       const response = await fetch(api_url, {
         method: 'POST',
