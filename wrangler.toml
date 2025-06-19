@@ -1,0 +1,5 @@
+name = "api-proxy-cloudflare-workers"
+main = "src/index.js"
+compatibility_date = "2024-06-01"
+usage_model = "bundled"  # hoặc 'unbound' nếu cần
+workers_dev = true       # hoặc false nếu dùng custom domain
