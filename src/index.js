@@ -7,13 +7,16 @@ export default {
 
         try {
             const body = await request.json();
+            const isCallback = !!body.callback_query;
+            
+            // Lấy thông tin cơ bản
+            const chatId = isCallback ? body.callback_query.message.chat.id : body.message?.chat?.id;
+            const messageId = isCallback ? body.callback_query.message.message_id : null;
+            const callbackQueryId = isCallback ? body.callback_query.id : null;
+            const text = (isCallback ? "" : body.message?.text || "").trim();
+            const callbackData = isCallback ? body.callback_query.data : null;
 
-            if (!body?.message?.text) {
-                return new Response("ok", { status: 200 });
-            }
-
-            const chatId = body.message.chat.id;
-            const text = body.message.text.trim();
+            if (!chatId && !callbackQueryId) return new Response("ok", { status: 200 });
 
             const apiDomain = env.API_DOMAIN;
             const apiUsername = env.API_USERNAME;
@@ -21,9 +24,7 @@ export default {
             const apiSecret = env.API_SECRET;
             const botToken = env.BOT_TOKEN;
 
-            // 🔥 encode Basic Auth (Worker không có Buffer)
             const basicAuth = btoa(`${apiUsername}:${apiPassword}`);
-
             const commonHeaders = {
                 "Authorization": `Basic ${basicAuth}`,
                 "Content-Type": "application/json",
@@ -31,10 +32,8 @@ export default {
                 ...(apiSecret && { "X-RVKH-Secret": apiSecret })
             };
 
-            let reply = "Sai cú pháp";
-
             // =========================
-            // 🔥 helper gọi API
+            // 🔥 Helpers
             // =========================
             async function callAPI(url, method = "GET") {
                 const res = await fetch(url, {
@@ -42,96 +41,121 @@ export default {
                     headers: commonHeaders,
                     redirect: "follow"
                 });
-
                 const text = await res.text();
-
-                if (!res.ok) {
-                    console.error("API Error:", res.status, text.substring(0, 300));
-                    throw new Error(`HTTP ${res.status}`);
-                }
-
-                // detect Cloudflare block
-                if (text.includes("Just a moment")) {
-                    throw new Error("Bị Cloudflare chặn");
-                }
-
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                if (text.includes("Just a moment")) throw new Error("Bị Cloudflare chặn");
                 return JSON.parse(text);
             }
 
+            async function sendToTelegram(method, params) {
+                return fetch(`https://api.telegram.org/bot${botToken}/${method}`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(params)
+                });
+            }
+
+            let reply = "";
+            let replyMarkup = null;
+
+            // =========================
+            // 🖱️ Xử lý Callback Query (Nút bấm)
+            // =========================
+            if (isCallback &&导callbackData) {
+                const [action, targetId] = callbackData.split(":");
+                
+                try {
+                    const data = await callAPI(`${apiDomain}/user?target=${targetId}&action=${action}`, "POST");
+                    
+                    if (data?.success) {
+                        const statusText = action === "lock" ? "🔒 Locked" : "✅ Active";
+                        const nextAction = action === "lock" ? "unlock" : "lock";
+                        const nextLabel = action === "lock" ? "🔓 Unlock" : "🔒 Lock";
+
+                        // Cập nhật nội dung tin nhắn cũ
+                        const newText = `✅ Đã thực hiện: ${action === "lock" ? "KHÓA" : "MỞ KHÓA"} thành công.\n` +
+                                      `👤 User: ${targetId}\n` +
+                                      `📊 Hiện tại: ${statusText}`;
+
+                        await sendToTelegram("editMessageText", {
+                            chat_id: chatId,
+                            message_id: messageId,
+                            text: newText,
+                            reply_markup: {
+                                inline_keyboard: [[{ text: `${nextLabel} ${targetId}`, callback_data: `${nextAction}:${targetId}` }]]
+                            }
+                        });
+
+                        await sendToTelegram("answerCallbackQuery", {
+                            callback_query_id: callbackQueryId,
+                            text: `Thành công: ${action}`
+                        });
+                    } else {
+                        await sendToTelegram("answerCallbackQuery", {
+                            callback_query_id: callbackQueryId,
+                            text: `Lỗi: ${data?.message || "Unknown"}`,
+                            show_alert: true
+                        });
+                    }
+                } catch (err) {
+                    await sendToTelegram("answerCallbackQuery", {
+                        callback_query_id: callbackQueryId,
+                        text: "Lỗi kết nối API",
+                        show_alert: true
+                    });
+                }
+                return new Response("ok", { status: 200 });
+            }
+
+            // =========================
+            // ⌨️ Xử lý Tin nhắn (Commands)
+            // =========================
             const parts = text.split(" ");
             const command = parts[0];
             const id = parts[1];
 
-            // =========================
-            // /user
-            // =========================
             if (command === "/user") {
                 if (!id) {
                     reply = "❌ Ví dụ: /user 123";
                 } else {
                     const data = await callAPI(`${apiDomain}/user?target=${id}`);
-
                     if (data?.id) {
-                        reply =
-                            `👤 User Info:\n` +
-                            `- ID: ${data.id}\n` +
-                            `- Email: ${data.email}\n` +
-                            `- Status: ${data.status === 'locked' ? '🔒 Locked' : '✅ Active'}`;
+                        const isLocked = data.status === 'locked';
+                        reply = `👤 User Info:\n` +
+                                `- ID: ${data.id}\n` +
+                                `- Email: ${data.email}\n` +
+                                `- Status: ${isLocked ? '🔒 Locked' : '✅ Active'}`;
+                        
+                        // Thêm nút bấm tùy theo trạng thái
+                        replyMarkup = {
+                            inline_keyboard: [[
+                                { 
+                                    text: isLocked ? `🔓 Unlock ${data.id}` : `🔒 Lock ${data.id}`, 
+                                    callback_data: isLocked ? `unlock:${data.id}` : `lock:${data.id}` 
+                                }
+                            ]]
+                        };
                     } else {
                         reply = `❌ Không tìm thấy user ${id}`;
                     }
                 }
-            }
-
-            // =========================
-            // /lock
-            // =========================
-            else if (command === "/lock") {
+            } else if (command === "/lock" || command === "/unlock") {
+                const action = command.replace("/", "");
                 if (!id) {
-                    reply = "❌ Ví dụ: /lock 123";
+                    reply = `❌ Ví dụ: /${action} 123`;
                 } else {
-                    const data = await callAPI(
-                        `${apiDomain}/user?target=${id}&action=lock`,
-                        "POST"
-                    );
-
-                    reply = data?.success
-                        ? `🔒 Đã khóa user ${id}`
-                        : `❌ Lỗi: ${data?.message || "Unknown"}`;
+                    const data = await callAPI(`${apiDomain}/user?target=${id}&action=${action}`, "POST");
+                    reply = data?.success ? `✅ Đã ${action === 'lock' ? 'khóa' : 'mở khóa'} user ${id}` : `❌ Lỗi: ${data?.message}`;
                 }
             }
 
-            // =========================
-            // /unlock
-            // =========================
-            else if (command === "/unlock") {
-                if (!id) {
-                    reply = "❌ Ví dụ: /unlock 123";
-                } else {
-                    const data = await callAPI(
-                        `${apiDomain}/user?target=${id}&action=unlock`,
-                        "POST"
-                    );
-
-                    reply = data?.success
-                        ? `🔓 Đã mở khóa user ${id}`
-                        : `❌ Lỗi: ${data?.message || "Unknown"}`;
-                }
-            }
-
-            // =========================
-            // 📤 gửi Telegram
-            // =========================
-            await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json"
-                },
-                body: JSON.stringify({
+            if (reply) {
+                await sendToTelegram("sendMessage", {
                     chat_id: chatId,
-                    text: reply
-                })
-            });
+                    text: reply,
+                    reply_markup: replyMarkup
+                });
+            }
 
             return new Response("ok", { status: 200 });
 
