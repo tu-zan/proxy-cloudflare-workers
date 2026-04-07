@@ -1,142 +1,167 @@
 export default {
-  async fetch(request, env) {
-    if (request.method !== "POST") {
-      return new Response("OK", { status: 200 });
+    async fetch(request, env) {
+        if (request.method !== "POST") return new Response("OK", { status: 200 });
+
+        try {
+            const body = await request.json();
+            const isCallback = !!body.callback_query;
+            
+            // 🆔 Basic parameters
+            const chatId = isCallback ? body.callback_query.message.chat.id : body.message?.chat?.id;
+            const messageId = isCallback ? body.callback_query.message.message_id : null;
+            const cbId = isCallback ? body.callback_query.id : null;
+            const text = (isCallback ? "" : body.message?.text || "").trim();
+            const cbData = isCallback ? body.callback_query.data : null;
+
+            if (!chatId && !cbId) return new Response("ok", { status: 200 });
+
+            // 🔑 Credentials
+            const { API_DOMAIN: domain, API_USERNAME: user, API_PASSWORD: pass, API_SECRET: secret, BOT_TOKEN: token } = env;
+            const basicAuth = btoa(`${user}:${pass}`);
+            const headers = {
+                "Authorization": `Basic ${basicAuth}`,
+                "Content-Type": "application/json",
+                "User-Agent": "Mozilla/5.0",
+                ...(secret && { "X-RVKH-Secret": secret })
+            };
+
+            // =========================
+            // 🛠️ Modular Helpers
+            // =========================
+            async function callWP(url, method = "GET") {
+                const res = await fetch(url, { method, headers, redirect: "follow" });
+                const raw = await res.text();
+                if (!res.ok) throw new Error(`WordPress API Error ${res.status}`);
+                if (raw.includes("Just a moment")) throw new Error("Cloudflare WAF Blocked Request");
+                return JSON.parse(raw);
+            }
+
+            async function tg(method, params) {
+                return fetch(`https://api.telegram.org/bot${token}/${method}`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(params)
+                });
+            }
+
+            // Generate message content & keyboard based on user status
+            function formatUserUI(userData) {
+                const isLocked = userData.status === 'locked';
+                const emoji = isLocked ? "🔒" : "✅";
+                const label = isLocked ? "Locked" : "Active";
+                
+                const text = `👤 <b>Thông tin Người dùng:</b>\n` +
+                             `━━━━━━━━━━━━━━\n` +
+                             `🆔 <b>ID:</b> <code>${userData.id}</code>\n` +
+                             `📧 <b>Email:</b> <code>${userData.email}</code>\n` +
+                             `📊 <b>Trạng thái:</b> ${emoji} ${label}`;
+                
+                const keyboard = {
+                    inline_keyboard: [[
+                        { 
+                            text: isLocked ? `🔓 Mở khóa cho ${userData.id}` : `🔒 Khóa user ${userData.id}`, 
+                            callback_data: `${isLocked ? 'unlock' : 'lock'}:${userData.id}` 
+                        }
+                    ]]
+                };
+
+                return { text, keyboard };
+            }
+
+            // =========================
+            // 🖱️ Callback Handling (Button Clicks)
+            // =========================
+            if (isCallback && cbData) {
+                const [action, targetId] = cbData.split(":");
+                
+                try {
+                    // Cập nhật WordPress
+                    const result = await callWP(`${domain}/user?target=${targetId}&action=${action}`, "POST");
+                    
+                    if (result?.success) {
+                        // Lấy trạng thái mới nhất để hiển thị
+                        const updated = await callWP(`${domain}/user?target=${targetId}`);
+                        const ui = formatUserUI(updated);
+
+                        // Cập nhật lại tin nhắn cũ với trạng thái mới
+                        await tg("editMessageText", {
+                            chat_id: chatId,
+                            message_id: messageId,
+                            text: `✨ <b>Thành công: Đã ${action === 'lock' ? 'Khóa' : 'Mở khóa'}</b>\n\n` + ui.text,
+                            parse_mode: "HTML",
+                            reply_markup: ui.keyboard
+                        });
+
+                        await tg("answerCallbackQuery", { callback_query_id: cbId, text: "Thao tác thành công!" });
+                    } else {
+                        throw new Error(result?.message || "WordPress rejected action");
+                    }
+                } catch (err) {
+                    await tg("answerCallbackQuery", { 
+                        callback_query_id: cbId, 
+                        text: `❌ Lỗi: ${err.message}`, 
+                        show_alert: true 
+                    });
+                }
+                return new Response("ok", { status: 200 });
+            }
+
+            // =========================
+            // ⌨️ Command Handling
+            // =========================
+            const parts = text.split(" ");
+            const command = parts[0];
+            const targetId = parts[1];
+
+            if (command === "/user") {
+                if (!targetId) {
+                    await tg("sendMessage", { chat_id: chatId, text: "❌ Cú pháp: <code>/user [ID hoặc Email]</code>", parse_mode: "HTML" });
+                } else {
+                    try {
+                        const data = await callWP(`${domain}/user?target=${targetId}`);
+                        if (data?.id) {
+                            const ui = formatUserUI(data);
+                            await tg("sendMessage", {
+                                chat_id: chatId,
+                                text: ui.text,
+                                parse_mode: "HTML",
+                                reply_markup: ui.keyboard
+                            });
+                        } else {
+                            await tg("sendMessage", { chat_id: chatId, text: `❌ Không tìm thấy người dùng: <b>${targetId}</b>`, parse_mode: "HTML" });
+                        }
+                    } catch (err) {
+                        await tg("sendMessage", { chat_id: chatId, text: `❌ Lỗi kết nối API: <code>${err.message}</code>`, parse_mode: "HTML" });
+                    }
+                }
+            } else if (command === "/lock" || command === "/unlock") {
+                const action = command.replace("/", "");
+                if (!targetId) {
+                    await tg("sendMessage", { chat_id: chatId, text: `❌ Cú pháp: <code>/${action} [ID]</code>`, parse_mode: "HTML" });
+                } else {
+                    try {
+                        const data = await callWP(`${domain}/user?target=${targetId}&action=${action}`, "POST");
+                        const statusEmoji = action === 'lock' ? '🔒' : '✅';
+                        await tg("sendMessage", { 
+                            chat_id: chatId, 
+                            text: data?.success 
+                                ? `${statusEmoji} <b>Đã ${action === 'lock' ? 'Khóa' : 'Mở khóa'} thành công user:</b> <code>${targetId}</code>` 
+                                : `❌ <b>Lỗi:</b> ${data?.message}`,
+                            parse_mode: "HTML"
+                        });
+                    } catch (err) {
+                        await tg("sendMessage", { chat_id: chatId, text: `❌ Lỗi: <code>${err.message}</code>`, parse_mode: "HTML" });
+                    }
+                }
+            } else if (command === "/start") {
+                await tg("sendMessage", { chat_id: chatId, text: "👋 <b>Chào mừng quản trị viên!</b>\n\nSử dụng lệnh <code>/user [ID]</code> để quản lý người dùng.", parse_mode: "HTML" });
+            }
+
+            return new Response("ok", { status: 200 });
+
+        } catch (err) {
+            console.error("Worker Global Error:", err);
+            return new Response("error", { status: 200 });
+        }
     }
-
-    try {
-      const body = await request.json();
-
-      if (!body?.message?.text) {
-        return new Response("ok", { status: 200 });
-      }
-
-      const chatId = body.message.chat.id;
-      const text = body.message.text.trim();
-
-      const apiDomain = env.API_DOMAIN;
-      const apiUsername = env.API_USERNAME;
-      const apiPassword = env.API_PASSWORD;
-      const apiSecret = env.API_SECRET;
-      const botToken = env.BOT_TOKEN;
-
-      // 🔥 encode Basic Auth (Worker không có Buffer)
-      const basicAuth = btoa(`${apiUsername}:${apiPassword}`);
-
-      const commonHeaders = {
-        "Authorization": `Basic ${basicAuth}`,
-        "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0",
-        ...(apiSecret && { "X-RVKH-Secret": apiSecret })
-      };
-
-      let reply = "Sai cú pháp";
-
-      // =========================
-      // 🔥 helper gọi API
-      // =========================
-      async function callAPI(url, method = "GET") {
-        const res = await fetch(url, {
-          method,
-          headers: commonHeaders,
-          redirect: "follow"
-        });
-
-        const text = await res.text();
-
-        if (!res.ok) {
-          console.error("API Error:", res.status, text.substring(0, 300));
-          throw new Error(`HTTP ${res.status}`);
-        }
-
-        // detect Cloudflare block
-        if (text.includes("Just a moment")) {
-          throw new Error("Bị Cloudflare chặn");
-        }
-
-        return JSON.parse(text);
-      }
-
-      const parts = text.split(" ");
-      const command = parts[0];
-      const id = parts[1];
-
-      // =========================
-      // /user
-      // =========================
-      if (command === "/user") {
-        if (!id) {
-          reply = "❌ Ví dụ: /user 123";
-        } else {
-          const data = await callAPI(`${apiDomain}/user?target=${id}`);
-
-          if (data?.id) {
-            reply =
-              `👤 User Info:\n` +
-              `- ID: ${data.id}\n` +
-              `- Email: ${data.email}\n` +
-              `- Status: ${data.status === 'locked' ? '🔒 Locked' : '✅ Active'}`;
-          } else {
-            reply = `❌ Không tìm thấy user ${id}`;
-          }
-        }
-      }
-
-      // =========================
-      // /lock
-      // =========================
-      else if (command === "/lock") {
-        if (!id) {
-          reply = "❌ Ví dụ: /lock 123";
-        } else {
-          const data = await callAPI(
-            `${apiDomain}/user?target=${id}&action=lock`,
-            "POST"
-          );
-
-          reply = data?.success
-            ? `🔒 Đã khóa user ${id}`
-            : `❌ Lỗi: ${data?.message || "Unknown"}`;
-        }
-      }
-
-      // =========================
-      // /unlock
-      // =========================
-      else if (command === "/unlock") {
-        if (!id) {
-          reply = "❌ Ví dụ: /unlock 123";
-        } else {
-          const data = await callAPI(
-            `${apiDomain}/user?target=${id}&action=unlock`,
-            "POST"
-          );
-
-          reply = data?.success
-            ? `🔓 Đã mở khóa user ${id}`
-            : `❌ Lỗi: ${data?.message || "Unknown"}`;
-        }
-      }
-
-      // =========================
-      // 📤 gửi Telegram
-      // =========================
-      await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          chat_id: chatId,
-          text: reply
-        })
-      });
-
-      return new Response("ok", { status: 200 });
-
-    } catch (err) {
-      console.error("Worker Error:", err);
-      return new Response("error", { status: 200 });
-    }
-  }
 };
