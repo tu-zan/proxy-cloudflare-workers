@@ -1,100 +1,143 @@
 export default {
-  async fetch(request) {
-    if (request.method === 'OPTIONS') {
-      return new Response(null, { status: 204, headers: corsHeaders() });
+  // Telegram bot reviewkhoahoc
+  async fetch(request, env) {
+    if (request.method !== "POST") {
+      return new Response("OK", { status: 200 });
     }
 
     try {
-      let api_url;
-      let customHeaders = {};
-      let body = null;
+      const body = await request.json();
 
-      // ===== GET =====
-      if (request.method === 'GET') {
-        const url = new URL(request.url);
-        api_url = url.searchParams.get("url");
+      if (!body?.message?.text) {
+        return new Response("ok", { status: 200 });
       }
 
-      // ===== POST =====
-      else if (request.method === 'POST') {
-        const reqBody = await request.json();
-        api_url = reqBody.api_url;
-        customHeaders = reqBody.headers || {};
-        body = reqBody.payload || null;
-      }
+      const chatId = body.message.chat.id;
+      const text = body.message.text.trim();
 
-      if (!api_url || !/^https?:\/\//.test(api_url)) {
-        return new Response(JSON.stringify({ error: 'Invalid api_url' }), {
-          status: 400,
-          headers: jsonHeaders()
-        });
-      }
+      const apiDomain = env.API_DOMAIN;
+      const apiUsername = env.API_USERNAME;
+      const apiPassword = env.API_PASSWORD;
+      const apiSecret = env.API_SECRET;
+      const botToken = env.BOT_TOKEN;
 
-      // 🔥 Forward headers chuẩn
-      const headers = new Headers();
+      // 🔥 encode Basic Auth (Worker không có Buffer)
+      const basicAuth = btoa(`${apiUsername}:${apiPassword}`);
 
-      // giữ nguyên header từ client
-      for (const key in customHeaders) {
-        headers.set(key, customHeaders[key]);
-      }
-
-      // fallback nếu thiếu
-      if (!headers.has("user-agent")) {
-        headers.set("user-agent", "Mozilla/5.0");
-      }
-
-      if (!headers.has("accept")) {
-        headers.set("accept", "application/json");
-      }
-
-      // 🔥 cực quan trọng (tránh cache + bot detect)
-      const fetchOptions = {
-        method: request.method === 'GET' ? 'GET' : 'POST',
-        headers,
-        redirect: "follow",
-        cf: {
-          cacheTtl: 0,
-          cacheEverything: false
-        }
+      const commonHeaders = {
+        "Authorization": `Basic ${basicAuth}`,
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0",
+        ...(apiSecret && { "X-RVKH-Secret": apiSecret })
       };
 
-      if (body && fetchOptions.method !== 'GET') {
-        fetchOptions.body = JSON.stringify(body);
+      let reply = "Sai cú pháp";
+
+      // =========================
+      // 🔥 helper gọi API
+      // =========================
+      async function callAPI(url, method = "GET") {
+        const res = await fetch(url, {
+          method,
+          headers: commonHeaders,
+          redirect: "follow"
+        });
+
+        const text = await res.text();
+
+        if (!res.ok) {
+          console.error("API Error:", res.status, text.substring(0, 300));
+          throw new Error(`HTTP ${res.status}`);
+        }
+
+        // detect Cloudflare block
+        if (text.includes("Just a moment")) {
+          throw new Error("Bị Cloudflare chặn");
+        }
+
+        return JSON.parse(text);
       }
 
-      const response = await fetch(api_url, fetchOptions);
+      const parts = text.split(" ");
+      const command = parts[0];
+      const id = parts[1];
 
-      const contentType = response.headers.get("content-type") || "text/plain";
-      const text = await response.text();
+      // =========================
+      // /user
+      // =========================
+      if (command === "/user") {
+        if (!id) {
+          reply = "❌ Ví dụ: /user 123";
+        } else {
+          const data = await callAPI(`${apiDomain}/user?target=${id}`);
 
-      return new Response(text, {
-        status: response.status,
-        headers: {
-          "content-type": contentType,
-          ...corsHeaders()
+          if (data?.id) {
+            reply =
+              `👤 User Info:\n` +
+              `- ID: ${data.id}\n` +
+              `- Email: ${data.email}\n` +
+              `- Status: ${data.status === 'locked' ? '🔒 Locked' : '✅ Active'}`;
+          } else {
+            reply = `❌ Không tìm thấy user ${id}`;
+          }
         }
+      }
+
+      // =========================
+      // /lock
+      // =========================
+      else if (command === "/lock") {
+        if (!id) {
+          reply = "❌ Ví dụ: /lock 123";
+        } else {
+          const data = await callAPI(
+            `${apiDomain}/user?target=${id}&action=lock`,
+            "POST"
+          );
+
+          reply = data?.success
+            ? `🔒 Đã khóa user ${id}`
+            : `❌ Lỗi: ${data?.message || "Unknown"}`;
+        }
+      }
+
+      // =========================
+      // /unlock
+      // =========================
+      else if (command === "/unlock") {
+        if (!id) {
+          reply = "❌ Ví dụ: /unlock 123";
+        } else {
+          const data = await callAPI(
+            `${apiDomain}/user?target=${id}&action=unlock`,
+            "POST"
+          );
+
+          reply = data?.success
+            ? `🔓 Đã mở khóa user ${id}`
+            : `❌ Lỗi: ${data?.message || "Unknown"}`;
+        }
+      }
+
+      // =========================
+      // 📤 gửi Telegram
+      // =========================
+      await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          chat_id: chatId,
+          text: reply
+        })
       });
+
+      return new Response("ok", { status: 200 });
 
     } catch (err) {
-      return new Response(JSON.stringify({ error: err.message }), {
-        status: 500,
-        headers: jsonHeaders()
-      });
+      console.error("Worker Error:", err);
+      return new Response("error", { status: 200 });
     }
   }
 };
-
-function corsHeaders() {
-  return {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-    "Access-Control-Allow-Headers": "*"
-  };
-}
-
-function jsonHeaders() {
-  return {
-    "content-type": "application/json",
-    ...corsHeaders()
-  };
-}
