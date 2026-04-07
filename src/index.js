@@ -5,7 +5,7 @@ export default {
         try {
             const body = await request.json();
             const isCallback = !!body.callback_query;
-            
+
             // 🆔 Basic parameters
             const chatId = isCallback ? body.callback_query.message.chat.id : body.message?.chat?.id;
             const messageId = isCallback ? body.callback_query.message.message_id : null;
@@ -49,18 +49,22 @@ export default {
                 const isLocked = userData.status === 'locked';
                 const emoji = isLocked ? "🔒" : "✅";
                 const label = isLocked ? "Locked" : "Active";
-                
+
                 const text = `👤 <b>Thông tin Người dùng:</b>\n` +
-                             `━━━━━━━━━━━━━━\n` +
-                             `🆔 <b>ID:</b> <code>${userData.id}</code>\n` +
-                             `📧 <b>Email:</b> <code>${userData.email}</code>\n` +
-                             `📊 <b>Trạng thái:</b> ${emoji} ${label}`;
-                
+                    `━━━━━━━━━━━━━━\n` +
+                    `🆔 <b>ID:</b> <code>${userData.id}</code>\n` +
+                    `📧 <b>Email:</b> <code>${userData.email}</code>\n` +
+                    `📊 <b>Trạng thái:</b> ${emoji} ${label}`;
+
                 const keyboard = {
                     inline_keyboard: [[
-                        { 
-                            text: isLocked ? `🔓 Mở khóa cho ${userData.id}` : `🔒 Khóa user ${userData.id}`, 
-                            callback_data: `${isLocked ? 'unlock' : 'lock'}:${userData.id}` 
+                        {
+                            text: isLocked ? `🔓 Mở khóa cho ${userData.id}` : `🔒 Khóa user ${userData.id}`,
+                            callback_data: `${isLocked ? 'unlock' : 'lock'}:${userData.id}`
+                        },
+                        {
+                            text: "📜 Lịch sử",
+                            callback_data: `history:${userData.id}`
                         }
                     ]]
                 };
@@ -73,34 +77,61 @@ export default {
             // =========================
             if (isCallback && cbData) {
                 const [action, targetId] = cbData.split(":");
-                
+
                 try {
-                    // Cập nhật WordPress
-                    const result = await callWP(`${domain}/user?target=${targetId}&action=${action}`, "POST");
-                    
-                    if (result?.success) {
-                        // Lấy trạng thái mới nhất để hiển thị
-                        const updated = await callWP(`${domain}/user?target=${targetId}`);
-                        const ui = formatUserUI(updated);
+                    if (action === 'history') {
+                        // 📜 Fetch and send login history
+                        const result = await callWP(`${domain}/user?target=${targetId}&action=login_history`, "POST");
 
-                        // Cập nhật lại tin nhắn cũ với trạng thái mới
-                        await tg("editMessageText", {
-                            chat_id: chatId,
-                            message_id: messageId,
-                            text: `✨ <b>Thành công: Đã ${action === 'lock' ? 'Khóa' : 'Mở khóa'}</b>\n\n` + ui.text,
-                            parse_mode: "HTML",
-                            reply_markup: ui.keyboard
-                        });
+                        if (result?.success && Array.isArray(result.data)) {
+                            let historyText = `📜 <b>Lịch sử đăng nhập: ${targetId}</b>\n` +
+                                `━━━━━━━━━━━━━━\n`;
+                            
+                            if (result.data.length === 0) {
+                                historyText += "<i>(Chưa có dữ liệu)</i>";
+                            } else {
+                                historyText += result.data.map(row => 
+                                    `<code>${row.user_id} - ${row.ip_address} - ${row.time_login} - ${row.browser} - ${row.operating_system}</code>`
+                                ).join("\n");
+                            }
 
-                        await tg("answerCallbackQuery", { callback_query_id: cbId, text: "Thao tác thành công!" });
+                            await tg("sendMessage", {
+                                chat_id: chatId,
+                                text: historyText,
+                                parse_mode: "HTML"
+                            });
+                            await tg("answerCallbackQuery", { callback_query_id: cbId });
+                        } else {
+                            throw new Error(result?.message || "Không thể lấy lịch sử");
+                        }
                     } else {
-                        throw new Error(result?.message || "WordPress rejected action");
+                        // 🔐 Handle Lock/Unlock
+                        const result = await callWP(`${domain}/user?target=${targetId}&action=${action}`, "POST");
+
+                        if (result?.success) {
+                            // Lấy trạng thái mới nhất để hiển thị
+                            const updated = await callWP(`${domain}/user?target=${targetId}`);
+                            const ui = formatUserUI(updated);
+
+                            // Cập nhật lại tin nhắn cũ với trạng thái mới
+                            await tg("editMessageText", {
+                                chat_id: chatId,
+                                message_id: messageId,
+                                text: `✨ <b>Thành công: Đã ${action === 'lock' ? 'Khóa' : 'Mở khóa'}</b>\n\n` + ui.text,
+                                parse_mode: "HTML",
+                                reply_markup: ui.keyboard
+                            });
+
+                            await tg("answerCallbackQuery", { callback_query_id: cbId, text: "Thao tác thành công!" });
+                        } else {
+                            throw new Error(result?.message || "WordPress rejected action");
+                        }
                     }
                 } catch (err) {
-                    await tg("answerCallbackQuery", { 
-                        callback_query_id: cbId, 
-                        text: `❌ Lỗi: ${err.message}`, 
-                        show_alert: true 
+                    await tg("answerCallbackQuery", {
+                        callback_query_id: cbId,
+                        text: `❌ Lỗi: ${err.message}`,
+                        show_alert: true
                     });
                 }
                 return new Response("ok", { status: 200 });
@@ -142,10 +173,10 @@ export default {
                     try {
                         const data = await callWP(`${domain}/user?target=${targetId}&action=${action}`, "POST");
                         const statusEmoji = action === 'lock' ? '🔒' : '✅';
-                        await tg("sendMessage", { 
-                            chat_id: chatId, 
-                            text: data?.success 
-                                ? `${statusEmoji} <b>Đã ${action === 'lock' ? 'Khóa' : 'Mở khóa'} thành công user:</b> <code>${targetId}</code>` 
+                        await tg("sendMessage", {
+                            chat_id: chatId,
+                            text: data?.success
+                                ? `${statusEmoji} <b>Đã ${action === 'lock' ? 'Khóa' : 'Mở khóa'} thành công user:</b> <code>${targetId}</code>`
                                 : `❌ <b>Lỗi:</b> ${data?.message}`,
                             parse_mode: "HTML"
                         });
