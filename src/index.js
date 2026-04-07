@@ -4,47 +4,51 @@ export default {
       return new Response(null, { status: 204, headers: corsHeaders() });
     }
 
-    if (request.method !== 'POST') {
-      return new Response(JSON.stringify({ error: 'Only POST allowed' }), {
-        status: 405,
-        headers: { 'content-type': 'application/json', ...corsHeaders() }
-      });
-    }
-
     try {
-      const { api_url, headers: customHeaders = {}, payload } = await request.json();
+      let api_url, customHeaders = {}, payload;
 
-      if (!api_url || typeof api_url !== 'string' || !/^https?:\/\//.test(api_url)) {
-        return new Response(JSON.stringify({ error: 'Invalid or missing api_url' }), {
+      if (request.method === 'GET') {
+        const url = new URL(request.url);
+        api_url = url.searchParams.get("url");
+      } else {
+        const body = await request.json();
+        api_url = body.api_url;
+        customHeaders = body.headers || {};
+        payload = body.payload;
+      }
+
+      if (!api_url || !/^https?:\/\//.test(api_url)) {
+        return new Response(JSON.stringify({ error: 'Invalid api_url' }), {
           status: 400,
           headers: { 'content-type': 'application/json', ...corsHeaders() }
         });
       }
 
-      // Chuẩn bị headers
       const headers = new Headers();
 
-      // Mặc định override
+      // giả lập browser
       headers.set('accept', 'application/json, text/plain, */*');
-      headers.set('accept-language', 'vi,en-US;q=0.9,en;q=0.8,uz;q=0.7');
-      headers.set('user-agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36');
-      headers.set('content-type', 'application/json');
+      headers.set('user-agent', 'Mozilla/5.0');
 
-      // Gắn thêm custom headers từ payload.headers
+      // merge headers từ client
       for (const key in customHeaders) {
-        if (customHeaders.hasOwnProperty(key)) {
-          headers.set(key, customHeaders[key]);
-        }
+        headers.set(key, customHeaders[key]);
       }
 
-      const response = await fetch(api_url, {
-        method: 'POST',
+      const fetchOptions = {
+        method: request.method === 'GET' ? 'GET' : 'POST',
         headers,
-        body: JSON.stringify(payload),
         redirect: 'follow'
-      });
+      };
 
-      const contentType = response.headers.get('content-type') || 'application/json';
+      if (payload && fetchOptions.method !== 'GET') {
+        fetchOptions.body = JSON.stringify(payload);
+        headers.set('content-type', 'application/json');
+      }
+
+      const response = await fetch(api_url, fetchOptions);
+
+      const contentType = response.headers.get('content-type') || 'text/plain';
       const body = await response.text();
 
       return new Response(body, {
@@ -62,12 +66,12 @@ export default {
       });
     }
   }
-}
+};
 
 function corsHeaders() {
   return {
     'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'POST,OPTIONS',
+    'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
     'Access-Control-Allow-Headers': '*'
   };
 }
