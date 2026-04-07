@@ -8,7 +8,7 @@ export default {
         try {
             const body = await request.json();
             const isCallback = !!body.callback_query;
-            
+
             // Lấy thông tin cơ bản
             const chatId = isCallback ? body.callback_query.message.chat.id : body.message?.chat?.id;
             const messageId = isCallback ? body.callback_query.message.message_id : null;
@@ -61,12 +61,12 @@ export default {
             // =========================
             // 🖱️ Xử lý Callback Query (Nút bấm)
             // =========================
-            if (isCallback &&导callbackData) {
+            if (isCallback && callbackData) {
                 const [action, targetId] = callbackData.split(":");
-                
+
                 try {
                     const data = await callAPI(`${apiDomain}/user?target=${targetId}&action=${action}`, "POST");
-                    
+
                     if (data?.success) {
                         const statusText = action === "lock" ? "🔒 Locked" : "✅ Active";
                         const nextAction = action === "lock" ? "unlock" : "lock";
@@ -74,8 +74,8 @@ export default {
 
                         // Cập nhật nội dung tin nhắn cũ
                         const newText = `✅ Đã thực hiện: ${action === "lock" ? "KHÓA" : "MỞ KHÓA"} thành công.\n` +
-                                      `👤 User: ${targetId}\n` +
-                                      `📊 Hiện tại: ${statusText}`;
+                            `👤 User: ${targetId}\n` +
+                            `📊 Hiện tại: ${statusText}`;
 
                         await sendToTelegram("editMessageText", {
                             chat_id: chatId,
@@ -122,16 +122,16 @@ export default {
                     if (data?.id) {
                         const isLocked = data.status === 'locked';
                         reply = `👤 User Info:\n` +
-                                `- ID: ${data.id}\n` +
-                                `- Email: ${data.email}\n` +
-                                `- Status: ${isLocked ? '🔒 Locked' : '✅ Active'}`;
-                        
+                            `- ID: ${data.id}\n` +
+                            `- Email: ${data.email}\n` +
+                            `- Status: ${isLocked ? '🔒 Locked' : '✅ Active'}`;
+
                         // Thêm nút bấm tùy theo trạng thái
                         replyMarkup = {
                             inline_keyboard: [[
-                                { 
-                                    text: isLocked ? `🔓 Unlock ${data.id}` : `🔒 Lock ${data.id}`, 
-                                    callback_data: isLocked ? `unlock:${data.id}` : `lock:${data.id}` 
+                                {
+                                    text: isLocked ? `🔓 Unlock ${data.id}` : `🔒 Lock ${data.id}`,
+                                    callback_data: isLocked ? `unlock:${data.id}` : `lock:${data.id}`
                                 }
                             ]]
                         };
